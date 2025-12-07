@@ -1,0 +1,155 @@
+name: 'Exam Grader'
+description: 'Grade written exams submitted via GitHub Issues'
+author: 'SignalWire Academy'
+
+branding:
+  icon: 'file-text'
+  color: 'blue'
+
+inputs:
+  answer-key-json:
+    description: 'Answer key as JSON string (pass from secret)'
+    required: true
+  passing-score:
+    description: 'Minimum percentage to pass'
+    required: false
+    default: '70'
+  show-answers-on-pass:
+    description: 'Show correct answers when student passes'
+    required: false
+    default: 'true'
+  close-on-pass:
+    description: 'Close issue when student passes'
+    required: false
+    default: 'true'
+
+outputs:
+  score:
+    description: 'Number of correct answers'
+    value: ${{ steps.grade.outputs.score }}
+  total:
+    description: 'Total number of questions'
+    value: ${{ steps.grade.outputs.total }}
+  percentage:
+    description: 'Percentage score'
+    value: ${{ steps.grade.outputs.percentage }}
+  passed:
+    description: 'Whether the submission passed'
+    value: ${{ steps.grade.outputs.passed }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Grade exam
+      id: grade
+      uses: actions/github-script@v7
+      env:
+        ANSWER_KEY_JSON: ${{ inputs.answer-key-json }}
+        PASSING_SCORE: ${{ inputs.passing-score }}
+        SHOW_ANSWERS: ${{ inputs.show-answers-on-pass }}
+        CLOSE_ON_PASS: ${{ inputs.close-on-pass }}
+      with:
+        script: |
+          // Load answer key from secret (passed as env var)
+          const answerKey = JSON.parse(process.env.ANSWER_KEY_JSON);
+          const passingScore = parseInt(process.env.PASSING_SCORE);
+          const showAnswers = process.env.SHOW_ANSWERS === 'true';
+          const closeOnPass = process.env.CLOSE_ON_PASS === 'true';
+          
+          // Parse student answers from issue body
+          const body = context.payload.issue.body;
+          const studentAnswers = {};
+          
+          // Support multiple formats:
+          // "1. A" or "1: A" or "1) A" or "Q1: A" or just "1 A"
+          const lines = body.split('\n');
+          for (const line of lines) {
+            const match = line.match(/^(?:Q)?\s*(\d+)[.:\)\s]+\s*([A-Da-d])/i);
+            if (match) {
+              studentAnswers[parseInt(match[1])] = match[2].toUpperCase();
+            }
+          }
+          
+          // Grade
+          const total = Object.keys(answerKey.answers).length;
+          let correct = 0;
+          const details = [];
+          
+          for (let q = 1; q <= total; q++) {
+            const qKey = q.toString();
+            const correctAnswer = answerKey.answers[qKey];
+            const studentAnswer = studentAnswers[q] || '-';
+            const isCorrect = studentAnswer === correctAnswer;
+            
+            if (isCorrect) correct++;
+            
+            details.push({
+              question: q,
+              student: studentAnswer,
+              correct: correctAnswer,
+              isCorrect
+            });
+          }
+          
+          const percentage = Math.round(correct / total * 100);
+          const passed = percentage >= passingScore;
+          
+          // Build report
+          let report = `## Exam Results\n\n`;
+          report += `**Exam:** ${answerKey.name || 'Written Exam'}\n`;
+          report += `**Score:** ${correct}/${total} (${percentage}%)\n`;
+          report += `**Status:** ${passed ? 'PASSED' : 'NOT PASSING'}\n`;
+          report += `**Required:** ${passingScore}%\n\n`;
+          
+          if (!passed) {
+            report += `> You need ${passingScore}% to pass. Review the material and submit again.\n\n`;
+          }
+          
+          report += `### Answer Review\n\n`;
+          report += `| Q# | Your Answer | ${passed && showAnswers ? 'Correct |' : ''} Result |\n`;
+          report += `|----|-------------|${passed && showAnswers ? '---------|' : ''} --------|\n`;
+          
+          for (const d of details) {
+            const status = d.isCorrect ? '✅' : '❌';
+            if (passed && showAnswers) {
+              report += `| ${d.question} | ${d.student} | ${d.correct} | ${status} |\n`;
+            } else {
+              report += `| ${d.question} | ${d.student} | ${status} |\n`;
+            }
+          }
+          
+          if (!passed) {
+            report += `\n*Correct answers are hidden until you pass.*\n`;
+          }
+          
+          report += `\n---\n*Graded: ${new Date().toISOString()}*`;
+          
+          // Post results as comment
+          await github.rest.issues.createComment({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: context.payload.issue.number,
+            body: report
+          });
+          
+          // Update labels
+          const currentLabels = context.payload.issue.labels.map(l => l.name);
+          const newLabels = currentLabels.filter(l => l !== 'passed' && l !== 'not-passing');
+          newLabels.push(passed ? 'passed' : 'not-passing');
+          
+          await github.rest.issues.update({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: context.payload.issue.number,
+            labels: newLabels,
+            state: (passed && closeOnPass) ? 'closed' : 'open'
+          });
+          
+          // Set outputs
+          core.setOutput('score', correct);
+          core.setOutput('total', total);
+          core.setOutput('percentage', percentage);
+          core.setOutput('passed', passed);
+          
+          console.log(`Score: ${correct}/${total} (${percentage}%)`);
+          console.log(`Status: ${passed ? 'PASSED' : 'NOT PASSING'}`);
