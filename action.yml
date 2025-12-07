@@ -19,9 +19,13 @@ inputs:
     required: false
     default: 'true'
   close-on-pass:
-    description: 'Close issue when student passes'
+    description: 'Close issue when student passes with 100%'
     required: false
     default: 'true'
+  next-assignment:
+    description: 'GitHub Classroom link to the next level first lab (shown on 100% completion)'
+    required: false
+    default: ''
 
 outputs:
   score:
@@ -48,6 +52,7 @@ runs:
         PASSING_SCORE: ${{ inputs.passing-score }}
         SHOW_ANSWERS: ${{ inputs.show-answers-on-pass }}
         CLOSE_ON_PASS: ${{ inputs.close-on-pass }}
+        NEXT_ASSIGNMENT: ${{ inputs.next-assignment }}
       with:
         script: |
           // Load answer key from secret (passed as env var)
@@ -55,6 +60,7 @@ runs:
           const passingScore = parseInt(process.env.PASSING_SCORE);
           const showAnswers = process.env.SHOW_ANSWERS === 'true';
           const closeOnPass = process.env.CLOSE_ON_PASS === 'true';
+          const nextAssignment = process.env.NEXT_ASSIGNMENT;
           
           // Parse student answers from issue body
           const body = context.payload.issue.body;
@@ -121,9 +127,15 @@ runs:
           if (!passed) {
             report += `\n*Correct answers are hidden until you pass.*\n`;
           }
-          
+
           report += `\n---\n*Graded: ${new Date().toISOString()}*`;
-          
+
+          // Add next assignment link if 100% and link provided
+          const isPerfect = percentage === 100;
+          if (isPerfect && nextAssignment) {
+            report += `\n\n---\n\n🎉 **Perfect score!** You've completed this level!\n\n👉 [**Start Next Level**](${nextAssignment})`;
+          }
+
           // Post results as comment
           await github.rest.issues.createComment({
             owner: context.repo.owner,
@@ -131,18 +143,21 @@ runs:
             issue_number: context.payload.issue.number,
             body: report
           });
-          
+
           // Update labels
           const currentLabels = context.payload.issue.labels.map(l => l.name);
           const newLabels = currentLabels.filter(l => l !== 'passed' && l !== 'not-passing');
           newLabels.push(passed ? 'passed' : 'not-passing');
-          
+
+          // Only close if 100% (not just passing)
+          const shouldClose = isPerfect && closeOnPass;
+
           await github.rest.issues.update({
             owner: context.repo.owner,
             repo: context.repo.repo,
             issue_number: context.payload.issue.number,
             labels: newLabels,
-            state: (passed && closeOnPass) ? 'closed' : 'open'
+            state: shouldClose ? 'closed' : 'open'
           });
           
           // Set outputs
